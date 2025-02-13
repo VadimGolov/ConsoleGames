@@ -1,213 +1,318 @@
-from random import shuffle
+import re
+import sys
+import json
+
+import requests
+from pathlib import Path
+from random import randint
+from bs4 import BeautifulSoup, PageElement
 
 
-class Card:
+# Получение html-кода с сайта
+def get_html(dict_url: str) -> list[str]:
+    # Запрос к сайту и получение html-кода
+    txt_html: str = requests.get(dict_url).text
 
-    def __init__(self, rank, suit, score) -> None:
-        self.__rank: str = rank
-        self.__suit: str = suit
-        self.__score: int = score
+    # Разбиение html-кода на строки
+    raw_html: list[str] = txt_html.split('\r\n')
+    final_html: list[str] = [line.strip() for line in raw_html if '<' in line and '>' in line]
 
-    def __str__(self) -> str:
-        return '|{:^15}|{:^8}|{:^18}|'.format(self.__rank, self.__suit, self.__score)
-
-
-class CardShoe:
-    __suits: list[str] = ['Пик', 'Бубнов', 'Треф', 'Червей']
-    __ranks: list[str] = [str(item) for item in range(2, 11)] + ['Валет', 'Дама', 'Король', 'Туз']
-    __scores: list[int] = [value for value in range(2, 11)] + [10, 10, 10, 11]
-
-    def __init__(self, deck_count: int = 6) -> None:
-        self.__cards: list[Card] = []
-        for _ in range(deck_count):
-            self.__cards += [Card(rank, suit, self.__scores[index]) for suit in self.__suits for index, rank in
-                             enumerate(self.__ranks)]
-        self.shuffle()
-
-    # Перемешиваем карты
-    def shuffle(self) -> None:
-        shuffle(self.__cards)
-
-    def __len__(self) -> int:
-        return len(self.__cards)
-
-    def __getitem__(self, position) -> Card:
-        return self.__cards[position]
-
-    def get_card(self) -> Card:
-        if len(self.__cards) == 0:
-            raise ValueError("Нет доступных карт в колоде")
-        current_card: Card = self.__cards.pop()
-        return current_card
+    return final_html
 
 
-class Player:
+# Очистка слова
+def clean_key(key_line: str) -> str:
+    # Очистка конца строки от знаков препинания
+    key_text: str = re.sub(r'[^а-яА-ЯёЁ]+$', '', key_line)
 
-    def __init__(self, name: str, card_shoe: CardShoe) -> None:
-        self.__name: str = name
-        self.__shoe: CardShoe = card_shoe
-        self.__hand: list[Card] = [self.__shoe.get_card(), self.__shoe.get_card()]
+    # Удаление окончания строки после символов (,/ для исключения многозначных ответов
+    key_text: str = re.sub(r'[(,/].*', '', key_text)
 
-    def take_card(self) -> None:
-        new_card: Card = self.__shoe.get_card()
-        self.__hand.append(new_card)
+    # Большая первая буква в слове
+    key_text: str = key_text[0].upper() + key_text[1:]
 
-    def __ace_index(self) -> int:
-        index: int = len(self.__hand)
+    return key_text.strip()
 
-        for item in reversed(self.__hand):
-            index -= 1
-            split_item: list[str] = str(item).split('|')
-            if 'Туз' in split_item[1]:
-                return index
+
+# Очистка описания слова
+def clean_value(val_line: str) -> str:
+    # Очистка начала строки от знаков препинания
+    val_text: str = re.sub(r'^[^а-яА-ЯёЁ]+', '', val_line)
+
+    if val_text == '':
+        return ''
+
+    # Удаление лишних пробелов
+    val_text: str = ' '.join(val_text.split())
+
+    # Удаление лишних слов
+    # Не использовал регулярные выражения [чтобы излишне не усложнять] для удаления () иногда остающихся после удаления слов
+    replace_words: list[str] = ['антилокус', 'Антилокус', 'локус', 'Локус', '()']
+
+    for one_word in replace_words:
+        val_text: str = val_text.replace(one_word, '')
+
+    # Удаление конца строки после кавычки
+    val_text: str = re.sub(r'».*', '', val_text)
+
+    # Большая первая буква предложения
+    val_text: str = val_text[0].upper() + val_text[1:]
+
+    return val_text.strip()
+
+
+# Заполнение игрового словаря
+def create_dict(begin_tag: BeautifulSoup, empty_dict: dict[str, str]) -> None:
+    val_text: str = ''
+
+    # Обработка слова и получение описания слова
+    key_text: str = clean_key(str(begin_tag.text))
+    val_elem: PageElement | None = begin_tag.next_sibling
+
+    # Если описание имеется обработка описания
+    if val_elem is not None:
+        val_text: str = clean_value(str(val_elem))
+
+    # Если после обработки слово и описание не стали пустыми строками - запись в словарь
+    if key_text != '' and val_text != '':
+        empty_dict[key_text]: dict[str, str] = val_text
+
+    return
+
+
+# Разбиение текста на строки по максимальному количеству символов
+def multi_text(txt: str, max_len: int) -> list[str]:
+    # Разбиение текста на строки
+    split_list: list[str] = txt.split()
+
+    # Текущая строка и список строк
+    current_line: str = ''
+    result_list: list[str] = []
+
+    # Формирование строк из слов с проверкой длины
+    for one_word in split_list:
+
+        if len(current_line) + len(one_word) + 1 <= max_len:
+
+            if current_line == '':
+                current_line: str = one_word
+            else:
+                current_line += ' ' + one_word
+
         else:
-            return -1
+            result_list.append(current_line)
+            current_line = one_word
 
-    def __get_score(self) -> int:
-        amount: int = 0
+    # Добавление последней строки
+    if current_line:
+        result_list.append(current_line)
 
-        for item in self.__hand:
-            split_item = str(item).split('|')
-            amount += int(split_item[3])
-
-        return amount
-
-    def ace_downgrade(self) -> None:
-        limit_score: int = self.__get_score()
-        work_index: int = self.__ace_index()
-
-        if work_index == -1:
-            return
-        else:
-            if limit_score > 21:
-                item: Card = self.__hand[work_index]
-                split_item: list[str] = str(item).split('|')
-                suite: str = split_item[2].strip()
-
-                self.__hand[work_index] = Card('Туз', suite, 1)
-
-    def get_name(self) -> str:
-        return self.__name
-
-    def get_info(self) -> tuple[str, int]:
-        hand_cards: str = ''
-        hand_score: int = 0
-
-        for item in self.__hand:
-            split_item: list[str] = str(item).split('|')
-            hand_cards += str(item) + '\n'
-            hand_score += int(split_item[3])
-
-        return hand_cards, hand_score
-
-    def is_blackjack(self) -> bool:
-        hand_cards: int = len(self.__hand)
-        hand_score: int = self.__get_score()
-
-        if hand_cards == 2 and hand_score == 21:
-            return True
-        else:
-            return False
+    return result_list
 
 
-# Таблица карт
-def print_scores(get_name, get_cards, get_score):
-    print('\n+{:->43}+'.format('-'))
-    print('|{:^43}|'.format(get_name))
-    print('+{:->15}+{:->8}+{:->18}+'.format('-', '-', '-'))
-    print('|{:^15}|{:^8}|{:^18}|'.format('Достоинство', 'Масть', 'Количество очков'))
-    print('+{:->15}+{:->8}+{:->18}+'.format('-', '-', '-'))
-    print(get_cards[:-1])
-    print('+{:->15}+{:->8}+{:->18}+'.format('-', '-', '-'))
-    print('| {: <11} : {: <28}|'.format('Сумма очков', get_score))
-    print('+{:->43}+'.format('-'))
-    print()
+# Парсинг сайта, заполнение игрового словаря
+# количество и пропуск строк связаны со спецификой kakras.ru (парсер не универсальный)
+def parse_site() -> dict[str, str]:
+    game_dict: dict[str, str] = {}
+
+    html_content: list[str] = get_html('https://slovar.kakras.ru')
+    curr_line: int = 0
+
+    while curr_line < 460:
+
+        curr_line += 1
+        html_line: str = html_content[curr_line]
+
+        soup: BeautifulSoup = BeautifulSoup(html_line, 'html.parser')
+
+        if curr_line == 319:
+            continue
+
+        elif curr_line < 40:
+            s_tag: BeautifulSoup = soup.find(name='strong')
+            if s_tag:
+                create_dict(s_tag, game_dict)
+
+        elif curr_line > 40:
+            b_tag: BeautifulSoup = soup.find(name='b')
+            if b_tag:
+                create_dict(b_tag, game_dict)
+
+    return game_dict
+
+
+# Проверка наличия json-файла с игровым словарем
+def verify_file() -> bool:
+    file_path: Path = Path('game_resource.json')
+
+    if file_path.is_file():
+        return True
+    else:
+        return False
+
+
+# Чтение json
+def json_reader() -> dict[str, str]:
+    file_path: Path = Path('game_resource.json')
+
+    with open(file_path, mode='r', encoding='utf-8') as json_file:
+        json_dict: dict[str, str] = json.load(json_file)
+
+    return json_dict
+
+
+# Запись json
+def json_writer(game_dict: dict[str, str]) -> None:
+    file_path: Path = Path('game_resource.json')
+
+    with open(file_path, mode='w', encoding='utf-8') as json_file:
+        json.dump(game_dict, json_file, ensure_ascii=False, indent=4)  # noqa PyTypeChecker
 
 
 # Запуск игры
-def start_game(some_names: list[str]) -> None:
-    # Играем в 6 колод
-    formed_shoe: CardShoe = CardShoe()
+def start_game() -> None:
+    print('\nИгра: Угадай старинное слово\n')
 
-    player_name = some_names[0]
-    dealer_name = some_names[1]
+    # Загрузка игрового словаря
+    parsed_dict: dict[str, str] = json_reader()
 
-    player: Player = Player(player_name, formed_shoe)
-    dealer: Player = Player(dealer_name, formed_shoe)
+    # Верхний предел для случайного выбора описания
+    upper_bound: int = len(parsed_dict) - 1
 
-    player.ace_downgrade()
-
-    player_cards, player_score = player.get_info()
-    dealer_cards, dealer_score = dealer.get_info()
-
-    print_scores(player.get_name(), player_cards, player_score)
+    # Подсчет правильных и неправильных ответов
+    win_score: int = 0
+    loss_score: int = 0
 
     while True:
-        ask: str = input('Вы хотите взять ещё одну карту? (да/нет): ').lower()
 
-        if ask == 'да' or ask == 'yes':
-            player.take_card()
-            player.ace_downgrade()
+        random_item: int = randint(0, upper_bound)
+        value_text: str = str(list(parsed_dict.values())[random_item])
+        answer_text: str = str(list(parsed_dict.keys())[random_item])
 
-            player_cards, player_score = player.get_info()
-            print_scores(player.get_name(), player_cards, player_score)
+        if len(value_text) > 100:
+            value_text: list[str] = multi_text(value_text, 100)
+            for _ in value_text:
+                print(_)
         else:
+            print(value_text)
+
+        print()
+        user_answer: str = input('Введите загаданное слово или 0 если хотите закончить игру: ')
+
+        if user_answer == '0':
+            print(
+                f'\nЗагаданное слово: {answer_text}. Вы дали {win_score} правильных ответов и {loss_score} - неправильных\n')
             break
 
-    while True:
-        if dealer_score <= 16:
-            dealer.take_card()
-            dealer.ace_downgrade()
-            dealer_cards, dealer_score = dealer.get_info()
-        if dealer_score >= 17:
-            break
-
-    print_scores(player.get_name(), player_cards, player_score)
-    print_scores(dealer.get_name(), dealer_cards, dealer_score)
-
-    if player.is_blackjack() and dealer.is_blackjack():
-        print(f'Ничья, но {player.get_name()} забрал выигрыш до того как Крупье открыл вторую карту | Выигрыш 1 к 1')
-    elif player.is_blackjack() and not dealer.is_blackjack():
-        print(f'{player.get_name()} выиграл | Выигрыш 3 к 2')
-    elif not player.is_blackjack() and dealer.is_blackjack():
-        print(f'{player.get_name()} проиграл')
-
-    elif 21 >= player_score > dealer_score:
-        print(f'{player.get_name()} выиграл | Выигрыш 1 к 1')
-    elif player_score <= 21 < dealer_score:
-        print(f'{player.get_name()} выиграл | Выигрыш 1 к 1')
-
-    elif 21 >= dealer_score > player_score:
-        print(f'{player.get_name()} проиграл')
-    elif dealer_score <= 21 < player_score:
-        print(f'{player.get_name()} проиграл')
-
-    elif player_score == dealer_score:
-        print('Ничья - менее 21 у обоих ')
-    elif player_score > 21 and dealer_score > 21:
-        print('Ничья - перебор у обоих')
+        elif user_answer.lower() == answer_text.lower():
+            win_score += 1
+            print(f'\nВерно! Правильных ответов: {win_score}: Неправильных ответов: {loss_score}\n')
+        else:
+            loss_score += 1
+            print(
+                f'\nНеверно! Правильный ответ: {answer_text}. Правильных ответов: {win_score}: Неправильных ответов: {loss_score}\n')
 
 
-if __name__ == '__main__':
-    while True:
-        user_name: str = input('Введите свое имя: ')
-        croupier_name: str = input('Если хотите вы можете ввести имя крупье: ')
+def advanced_parser(option) -> None:
+    save_request: str = 'y'
 
-        if user_name:
-            break
+    temp_dict: dict[str, str] = parse_site()
+    print('+-------------------------------------------------------+')
+    print('| Сайт: slovar.kakras.ru успешно распасен               |')
+    print('+-------------------------------------------------------+')
 
-    if croupier_name:
-        players: list[str] = [user_name, croupier_name]
+    if option:
+
+        print('| Вы хотите сохранить данные для игры? (y/n)            |')
+        print('+-------------------------------------------------------+\n')
+
+        save_request: str = input('Выберите действие: ')
+
+        if save_request.lower() == 'n':
+            print('+-------------------------------------------------------+')
+            print('| Программа завершается                                 |')
+            print('+-------------------------------------------------------+\n')
+            exit()
+
+    if save_request.lower() == 'y' or not option:
+        json_writer(temp_dict)
+        print('+-------------------------------------------------------+')
+        print('| Файл с данными для игры успешно сохранен              |')
+        print('+-------------------------------------------------------+')
+        print('| Если вы хотите изменить слова, дополнить список слов  |')
+        print('| изменить или дополнить описания слов, вам необходимо  |')
+        print('| отредактировать файл: game_resource.json              |')
+        print('+-------------------------------------------------------+\n')
+
+
+# Начальное меню и описание игры
+def game_manager() -> None:
+    option_script: bool = verify_file()
+
+    # Введение
+    print('+-------------------------------------------------------+')
+    print('| Здравствуйте!                                         |')
+    print('| Сегодня в лёгкой игровой форме мы с Вами              |')
+    print('| Узнаем некоторые старинные слова и даже пару пословиц |')
+    print('+-------------------------------------------------------+\n')
+
+    if option_script:
+
+        print('+-------------------------------------------------------+')
+        print('| Файл с игровым словарем найден                        |')
+        print('+-------------------------------------------------------+')
+        print('| 1. Начать игру                                        |')
+        print('| 2. Распарсить сайт: slovar.kakras.ru                  |')
+        print('| 3. Закрыть программу                                  |')
+        print('+-------------------------------------------------------+\n')
+
     else:
-        players: list[str] = [user_name, 'Дилер']
 
-    print('\n', ' {:^43} '.format('Сегодня играм на 6 колодах'))
+        print('+-------------------------------------------------------+')
+        print('| Файл с игровым словарем не найден                     |')
+        print('+-------------------------------------------------------+')
+        print('| Придется распарсить сайт и сохранить данные           |')
+        print('+-------------------------------------------------------+\n')
 
-    while True:
-        start_game(players)
-        game_ask: str = input('Хотите сыграть еще раз? (да/нет): ').lower()
+    if option_script:
 
-        if game_ask == 'нет' or game_ask == 'no':
-            break
+        main_request: str = input('Выберите действие (1/2/3): ')
 
-    input('\nДля закрытия окна программы нажмите Enter')
+        if main_request == '1':
+            start_game()
+        elif main_request == '2':
+            advanced_parser(True)
+            print('+-------------------------------------------------------+')
+            print('| Так что сыграем?                                      |')
+            print('+-------------------------------------------------------+\n')
+
+            game_request: str = input('(y/n): ')
+            if game_request.lower() == 'y':
+                start_game()
+
+        print('+-------------------------------------------------------+')
+        print('| Без списка слов и их описаний Вы не сможете играть    |')
+        print('| Программа завершается                                 |')
+        print('+-------------------------------------------------------+\n')
+        sys.exit(1)
+
+    elif not option_script:
+        advanced_parser(False)
+        print('+-------------------------------------------------------+')
+        print('| Все готово, сыграем?                                  |')
+        print('+-------------------------------------------------------+\n')
+
+        game_request: str = input('(y/n): ')
+        if game_request.lower() == 'y':
+            start_game()
+
+        print('+-------------------------------------------------------+')
+        print('| Без списка слов и их описаний Вы не сможете играть    |')
+        print('| Программа завершается                                 |')
+        print('+-------------------------------------------------------+\n')
+        sys.exit(1)
+
+
+# Программа
+if __name__ == '__main__':
+    game_manager()
