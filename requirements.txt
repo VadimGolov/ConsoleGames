@@ -1,4 +1,4 @@
-pip>=24.2
+pip>=25.0.1
 setuptools>=75.2.0
 wheel>=0.44.0
 pathlib >= 1.0.1
